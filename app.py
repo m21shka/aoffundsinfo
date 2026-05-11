@@ -4,8 +4,19 @@ from datetime import datetime
 from collections import defaultdict
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="AoF Funds Panel")
+
+# === CORS: Разрешаем запросы с браузера ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Разрешаем все домены (для продакшена лучше указать конкретный)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 DB_PATH = "funds.db"
 ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
 
@@ -66,7 +77,6 @@ async def admin_page():
             button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
             .footer {{ text-align: center; margin-top: 16px; opacity: 0.4; font-size: 0.75rem; }}
             
-            /* Стили для уведомления */
             .notification {{
                 position: fixed;
                 top: 20px;
@@ -140,14 +150,14 @@ async def admin_page():
                     if (response.ok) {{
                         showNotification('✅ Данные успешно сохранены!', true);
                         form.reset();
-                        // Обновляем значения полей на новые
                         document.querySelector('input[name="jackpot"]').value = result.jackpot || formData.get('jackpot');
                         document.querySelector('input[name="aif"]').value = result.aif || formData.get('aif');
                     }} else {{
-                        showNotification('❌ ' + result.detail, false);
+                        showNotification('❌ ' + (result.detail || 'Ошибка'), false);
                     }}
                 }} catch (error) {{
-                    showNotification('❌ Ошибка соединения', false);
+                    console.error('Error:', error);
+                    showNotification('❌ Ошибка соединения: ' + error.message, false);
                 }} finally {{
                     submitBtn.disabled = false;
                     submitBtn.textContent = '💾 Сохранить';
@@ -170,16 +180,15 @@ async def update_funds(jackpot: int = Form(...), aif: int = Form(...), password:
     conn.execute("INSERT INTO funds (jackpot, aif) VALUES (?, ?)", (jackpot, aif))
     conn.commit()
     
-    # Получаем только что сохраненные данные для возврата
     row = conn.execute("SELECT jackpot, aif FROM funds ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
     
-    return {{
+    return {
         "status": "ok", 
         "message": "Данные сохранены",
         "jackpot": row["jackpot"],
         "aif": row["aif"]
-    }}
+    }
 
 @app.get("/api/data")
 async def get_funds_data():
@@ -188,21 +197,21 @@ async def get_funds_data():
     conn.close()
 
     if not rows:
-        return {{"latest": {{"jackpot": 0, "aif": 0}}, "monthly_averages": []}}
+        return {"latest": {"jackpot": 0, "aif": 0}, "monthly_averages": []}
 
     latest = rows[-1]
-    latest_data = {{
+    latest_data = {
         "jackpot": latest["jackpot"],
         "aif": latest["aif"],
         "updated": latest["created_at"]
-    }}
+    }
 
     monthly = defaultdict(list)
-    month_names = {{
+    month_names = {
         "01": "Январь", "02": "Февраль", "03": "Март", "04": "Апрель", "05": "Май",
         "06": "Июнь", "07": "Июль", "08": "Август", "09": "Сентябрь", "10": "Октябрь",
         "11": "Ноябрь", "12": "Декабрь"
-    }}
+    }
 
     for r in rows:
         try:
@@ -218,11 +227,11 @@ async def get_funds_data():
         jp_avg = sum(d[0] for d in data) / len(data)
         aif_avg = sum(d[1] for d in data) / len(data)
         month_num = month_key.split("-")[1]
-        averages.append({{
+        averages.append({
             "month_key": month_key,
             "month_name": month_names.get(month_num, "Месяц"),
             "jackpot_avg": round(jp_avg, 1),
             "aif_avg": round(aif_avg, 1)
-        }})
+        })
 
-    return {{"latest": latest_data, "monthly_averages": averages}}
+    return {"latest": latest_data, "monthly_averages": averages}
