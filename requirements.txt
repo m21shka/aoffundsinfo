@@ -1,5 +1,9 @@
+# Для Веб-панели (Render)
 fastapi==0.109.0
 uvicorn==0.27.0
-pydantic==2.5.0
 python-multipart==0.0.6
-psycopg2-binary==2.9.9  # <-- Добавлено для работы с Neon
+psycopg2-binary==2.9.9  # Драйвер для Neon PostgreSQL
+
+# Для Telegram Бота (VPS)
+aiogram==3.3.0
+aiohttp==3.9.1          # Для HTTP запросов к API
