@@ -2,7 +2,7 @@ import os
 import psycopg2
 from datetime import datetime, timedelta
 from collections import defaultdict
-from fastapi import FastAPI, Form, HTTPException, Request, Response, Cookie
+from fastapi import FastAPI, Form, Request, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,14 +25,12 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL не найден в переменных окружения!")
 
 def get_db():
-    # Подключение к Neon PostgreSQL
     conn = psycopg2.connect(DATABASE_URL)
     return conn
 
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    # Синтаксис Postgres: SERIAL для автоинкремента
     cur.execute("""CREATE TABLE IF NOT EXISTS funds (
         id SERIAL PRIMARY KEY,
         jackpot INTEGER DEFAULT 0,
@@ -58,9 +56,9 @@ async def admin_page():
     conn.close()
     
     if row:
-        # row[0]=jackpot, row[1]=aif, row[2]=created_at
         dt_utc = row[2]
-        if dt_utc.tzinfo is None: dt_utc = dt_utc.replace(tzinfo=None)
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=None)
         dt_msk = dt_utc + MSK_OFFSET
         updated = dt_msk.strftime("%d.%m %H:%M")
         jp_val = row[0]
@@ -108,7 +106,7 @@ async def admin_page():
                 <div class="input-group"><label>Jackpot (BB)</label><input type="number" name="jackpot" value="{jp_val}" required></div>
                 <div class="input-group"><label>All-in-Fortune (BB)</label><input type="number" name="aif" value="{aif_val}" required></div>
                 <div class="input-group"><label>🔑 Пароль</label><input type="password" name="password" required placeholder="Введи секрет"></div>
-                <button type="submit" id="submitBtn"> Сохранить</button>
+                <button type="submit" id="submitBtn">💾 Сохранить</button>
             </form>
             <div class="nav-links"><a href="/admin">⚙️ Админ-панель</a></div>
             <div class="footer">PokerOK • AoF • Telegram Bot Ready</div>
@@ -137,111 +135,223 @@ async def admin_page():
 
 @app.post("/update")
 async def update_funds(jackpot: int = Form(...), aif: int = Form(...), password: str = Form(...)):
-    if password != ADMIN_PASSWORD: raise HTTPException(401, "Неверный пароль")
-    conn = get_db(); cur = conn.cursor()
-    # Postgres синтаксис: %s
+    global ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
+    
+    if password != ADMIN_PASSWORD:
+        return HTMLResponse('{"detail":"Неверный пароль"}', status_code=401, media_type="application/json")
+    if jackpot < 0 or aif < 0:
+        return HTMLResponse('{"detail":"Значения не могут быть отрицательными"}', status_code=400, media_type="application/json")
+    
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("INSERT INTO funds (jackpot, aif) VALUES (%s, %s) RETURNING id, jackpot, aif", (jackpot, aif))
     row = cur.fetchone()
-    conn.commit(); cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"status": "ok", "jackpot": row[1], "aif": row[2]}
 
-# === АДМИНКА С ВХОДОМ ===
+# === ВХОД В АДМИНКУ ===
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_panel(request: Request, auth: str = Cookie(None)):
     if auth != "granted":
-        return HTMLResponse("""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Вход</title>
-        <style>body{background:#0f1115;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
-        .card{background:#1a1d24;padding:30px;border-radius:16px;width:300px;text-align:center;}
-        input{width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#111;color:#fff;margin-bottom:15px;}
-        button{width:100%;padding:12px;background:#00d4aa;border:none;border-radius:8px;color:#000;font-weight:bold;cursor:pointer;}
-        </style></head><body><div class="card"><h2>🔒 Вход</h2>
-        <form method="post" action="/admin/login"><input type="password" name="password" placeholder="Пароль" required><button>Войти</button></form></div></body></html>""")
-
-    conn = get_db(); cur = conn.cursor()
+        return HTMLResponse("""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Вход в панель</title>
+            <style>
+                body{background:#0f1115;color:#e0e0e0;font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
+                .card{background:#1a1d24;padding:30px;border-radius:16px;width:320px;box-shadow:0 8px 30px rgba(0,0,0,0.5);}
+                h2{text-align:center;color:#00d4aa;margin-bottom:20px;}
+                .input-group{margin-bottom:15px;}
+                label{display:block;margin-bottom:5px;font-size:0.9rem;opacity:0.8;}
+                input{width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#111;color:#fff;font-size:1rem;box-sizing:border-box;}
+                input:focus{outline:none;border-color:#00d4aa;}
+                button{width:100%;padding:14px;background:#00d4aa;border:none;border-radius:8px;color:#000;font-weight:bold;font-size:1rem;cursor:pointer;margin-top:10px;}
+                button:hover{opacity:0.9;}
+                .notif{position:fixed;top:20px;left:50%;transform:translateX(-50%);padding:12px 24px;border-radius:8px;font-weight:500;display:none;z-index:1000;}
+                .notif.show{display:block;}
+                .notif.error{background:#ff4757;color:#fff;}
+                a{color:#00d4aa;text-decoration:none;}
+            </style>
+        </head>
+        <body>
+            <div class="notif error" id="errorNotif"></div>
+            <div class="card">
+                <h2>🔒 Вход в панель</h2>
+                <form id="loginForm">
+                    <div class="input-group">
+                        <label>Пароль администратора:</label>
+                        <input type="password" id="password" name="password" placeholder="Введи пароль" required autofocus>
+                    </div>
+                    <button type="submit">🔓 Войти</button>
+                </form>
+                <div style="text-align:center;margin-top:15px;"><a href="/">← На главную</a></div>
+            </div>
+            <script>
+                const form = document.getElementById('loginForm');
+                const notif = document.getElementById('errorNotif');
+                
+                form.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const pwd = document.getElementById('password').value;
+                    const fd = new FormData();
+                    fd.append('password', pwd);
+                    
+                    try {
+                        const response = await fetch('/admin/login', {method: 'POST', body: fd});
+                        if (response.ok) {
+                            window.location.href = '/admin';
+                        } else {
+                            notif.textContent = '❌ Неверный пароль';
+                            notif.classList.add('show');
+                            setTimeout(() => notif.classList.remove('show'), 3000);
+                            document.getElementById('password').value = '';
+                        }
+                    } catch (err) {
+                        notif.textContent = '❌ Ошибка соединения';
+                        notif.classList.add('show');
+                        setTimeout(() => notif.classList.remove('show'), 3000);
+                    }
+                });
+            </script>
+        </body>
+        </html>""")
+    
+    # Показываем админку если авторизован
+    global ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
+    
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("SELECT * FROM funds ORDER BY created_at DESC")
-    rows = cur.fetchall(); cur.close(); conn.close()
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
     
     rows_html = ""
     for row in rows:
-        # row: id, jackpot, aif, created_at
         dt_utc = row[3]
-        if dt_utc.tzinfo is None: dt_utc = dt_utc.replace(tzinfo=None)
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=None)
         dt_msk = dt_utc + MSK_OFFSET
         rows_html += f"""<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td>
         <td>{dt_msk.strftime('%d.%m %H:%M')}</td>
         <td><button onclick="editRec({row[0]},{row[1]},{row[2]})" style="background:#4ecdc4;padding:5px 10px;font-size:0.8rem;width:auto;margin:0;">✏️</button>
-        <button onclick="delRec({row[0]})" style="background:#ff6b6b;padding:5px 10px;font-size:0.8rem;width:auto;margin:0 0 0 5px;">️</button></td></tr>"""
+        <button onclick="delRec({row[0]})" style="background:#ff6b6b;padding:5px 10px;font-size:0.8rem;width:auto;margin:0 0 0 5px;">🗑️</button></td></tr>"""
     
     html = f"""
-    <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Админ-панель</title>
-    <style>
-        :root{{--bg:#0f1115;--card:#1a1d24;--accent:#00d4aa;--text:#e0e0e0;--danger:#ff6b6b;}}
-        body{{margin:0;font-family:system-ui;background:var(--bg);color:var(--text);padding:20px;}}
-        .container{{max-width:1000px;margin:0 auto;}} h1{{color:var(--accent);text-align:center;}}
-        .card{{background:var(--card);padding:24px;border-radius:16px;margin-bottom:20px;}}
-        .nav{{text-align:center;margin-bottom:20px;}}.nav a{{color:var(--accent);text-decoration:none;margin:0 10px;}}
-        table{{width:100%;border-collapse:collapse;margin-top:15px;}}
-        th,td{{padding:10px;text-align:left;border-bottom:1px solid #333;}}th{{background:#111;color:var(--accent);}}
-        .notif{{position:fixed;top:20px;right:20px;padding:15px 20px;border-radius:10px;font-weight:500;transform:translateX(400px);transition:0.3s;z-index:1000;}}
-        .notif.show{{transform:translateX(0);}}.notif.ok{{background:#00d4aa;color:#000;}}.notif.err{{background:#ff6b6b;color:#fff;}}
-    </style></head><body>
-    <div class="notif" id="n"></div>
-    <div class="container">
-        <div class="nav"><a href="/"> На главную</a> | <a href="/admin/logout">🚪 Выйти</a></div>
-        <h1>⚙️ Админ-панель (Neon DB)</h1>
-        <div class="card"><h2>📊 Записи</h2>
-        <table><thead><tr><th>ID</th><th>Jackpot</th><th>All-in-Fortune</th><th>Дата (МСК)</th><th>Действия</th></tr></thead>
-        <tbody>{rows_html or '<tr><td colspan="5" style="text-align:center;opacity:0.5;">Нет записей</td></tr>'}</tbody></table></div>
-    </div>
-    <script>
-    const n=document.getElementById('n');
-    function msg(t,ok=true){{n.textContent=t;n.className='notif show '+(ok?'ok':'err');setTimeout(()=>n.classList.remove('show'),3000);}}
-    async function delRec(id){{if(!confirm('Удалить #'+id+'?'))return;
-    const p=prompt('Пароль админа:');const fd=new FormData();fd.append('id',id);fd.append('password',p);
-    const r=await fetch('/admin/delete',{{method:'POST',body:fd}});const d=await r.json();
-    r.ok?msg('✅ Удалено',true)&&setTimeout(()=>location.reload(),1000):msg('❌ '+d.detail,false);}}
-    async function editRec(id,jp,aif){{
-    const nj=prompt('Новый Jackpot:',jp);if(nj===null)return;
-    const na=prompt('Новый All-in-Fortune:',aif);if(na===null)return;
-    const p=prompt('Пароль админа:');const fd=new FormData();fd.append('id',id);fd.append('jackpot',nj);fd.append('aif',na);fd.append('password',p);
-    const r=await fetch('/admin/edit',{{method:'POST',body:fd}});const d=await r.json();
-    r.ok?msg('✅ Обновлено',true)&&setTimeout(()=>location.reload(),1000):msg('❌ '+d.detail,false);}}
-    </script></body></html>
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Админ-панель</title>
+        <style>
+            :root{{--bg:#0f1115;--card:#1a1d24;--accent:#00d4aa;--text:#e0e0e0;--danger:#ff6b6b;}}
+            body{{margin:0;font-family:system-ui;background:var(--bg);color:var(--text);padding:20px;}}
+            .container{{max-width:1000px;margin:0 auto;}}
+            h1{{color:var(--accent);text-align:center;}}
+            .card{{background:var(--card);padding:24px;border-radius:16px;margin-bottom:20px;}}
+            .nav{{text-align:center;margin-bottom:20px;}}.nav a{{color:var(--accent);text-decoration:none;margin:0 10px;}}
+            table{{width:100%;border-collapse:collapse;margin-top:15px;}}
+            th,td{{padding:10px;text-align:left;border-bottom:1px solid #333;}}th{{background:#111;color:var(--accent);}}
+            .notif{{position:fixed;top:20px;right:20px;padding:15px 20px;border-radius:10px;font-weight:500;transform:translateX(400px);transition:0.3s;z-index:1000;}}
+            .notif.show{{transform:translateX(0);}}.notif.ok{{background:#00d4aa;color:#000;}}.notif.err{{background:#ff6b6b;color:#fff;}}
+        </style>
+    </head>
+    <body>
+        <div class="notif" id="n"></div>
+        <div class="container">
+            <div class="nav"><a href="/">🏠 На главную</a> | <a href="/admin/logout">🚪 Выйти</a></div>
+            <h1>⚙️ Админ-панель (Neon DB)</h1>
+            <div class="card"><h2>📊 Записи</h2>
+            <table><thead><tr><th>ID</th><th>Jackpot</th><th>All-in-Fortune</th><th>Дата (МСК)</th><th>Действия</th></tr></thead>
+            <tbody>{rows_html or '<tr><td colspan="5" style="text-align:center;opacity:0.5;">Нет записей</td></tr>'}</tbody></table></div>
+        </div>
+        <script>
+        const n=document.getElementById('n');
+        function msg(t,ok=true){{n.textContent=t;n.className='notif show '+(ok?'ok':'err');setTimeout(()=>n.classList.remove('show'),3000);}}
+        async function delRec(id){{if(!confirm('Удалить #'+id+'?'))return;
+        const p=prompt('Пароль админа:');const fd=new FormData();fd.append('id',id);fd.append('password',p);
+        const r=await fetch('/admin/delete',{{method:'POST',body:fd}});const d=await r.json();
+        r.ok?msg('✅ Удалено',true)&&setTimeout(()=>location.reload(),1000):msg('❌ '+d.detail,false);}}
+        async function editRec(id,jp,aif){{
+        const nj=prompt('Новый Jackpot:',jp);if(nj===null)return;
+        const na=prompt('Новый All-in-Fortune:',aif);if(na===null)return;
+        const p=prompt('Пароль админа:');const fd=new FormData();fd.append('id',id);fd.append('jackpot',nj);fd.append('aif',na);fd.append('password',p);
+        const r=await fetch('/admin/edit',{{method:'POST',body:fd}});const d=await r.json();
+        r.ok?msg('✅ Обновлено',true)&&setTimeout(()=>location.reload(),1000):msg('❌ '+d.detail,false);}}
+        </script>
+    </body>
+    </html>
     """
     return HTMLResponse(html)
 
 @app.post("/admin/login")
-async def admin_login(password: str = Form(...), response: Response = None):
+async def admin_login(request: Request, password: str = Form(...)):
+    global ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
+    
     if password == ADMIN_PASSWORD:
-        response.set_cookie(key="auth", value="granted", httponly=True, samesite="lax")
-        return RedirectResponse(url="/admin", status_code=302)
-    raise HTTPException(401, "Неверный пароль")
+        response = RedirectResponse(url="/admin", status_code=302)
+        response.set_cookie(key="auth", value="granted", httponly=False, samesite="lax", max_age=86400)
+        return response
+    else:
+        return HTMLResponse("Неверный пароль", status_code=401)
 
 @app.get("/admin/logout")
-async def admin_logout(response: Response):
+async def admin_logout(response: RedirectResponse = None):
+    response = RedirectResponse(url="/admin", status_code=302)
     response.delete_cookie("auth")
-    return RedirectResponse(url="/admin", status_code=302)
+    return response
 
 @app.post("/admin/edit")
 async def edit_record(id: int = Form(...), jackpot: int = Form(...), aif: int = Form(...), password: str = Form(...)):
-    if password != ADMIN_PASSWORD: raise HTTPException(401, "Неверный пароль")
-    conn = get_db(); cur = conn.cursor(); cur.execute("UPDATE funds SET jackpot=%s, aif=%s WHERE id=%s", (jackpot, aif, id)); conn.commit(); cur.close(); conn.close()
+    global ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
+    
+    if password != ADMIN_PASSWORD:
+        return HTMLResponse('{"detail":"Неверный пароль"}', status_code=401, media_type="application/json")
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE funds SET jackpot=%s, aif=%s WHERE id=%s", (jackpot, aif, id))
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"status": "ok"}
 
 @app.post("/admin/delete")
 async def delete_record(id: int = Form(...), password: str = Form(...)):
-    if password != ADMIN_PASSWORD: raise HTTPException(401, "Неверный пароль")
-    conn = get_db(); cur = conn.cursor(); cur.execute("DELETE FROM funds WHERE id=%s", (id,)); conn.commit(); cur.close(); conn.close()
+    global ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
+    
+    if password != ADMIN_PASSWORD:
+        return HTMLResponse('{"detail":"Неверный пароль"}', status_code=401, media_type="application/json")
+    
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM funds WHERE id=%s", (id,))
+    conn.commit()
+    cur.close()
+    conn.close()
     return {"status": "ok"}
 
 @app.get("/api/data")
 async def get_funds_data():
-    conn = get_db(); cur = conn.cursor()
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("SELECT jackpot, aif, created_at FROM funds ORDER BY created_at ASC")
-    rows = cur.fetchall(); cur.close(); conn.close()
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
     
-    if not rows: return {"latest": {"jackpot": 0, "aif": 0}, "monthly_averages": []}
+    if not rows:
+        return {"latest": {"jackpot": 0, "aif": 0}, "monthly_averages": []}
     
     latest = rows[-1]
     latest_data = {"jackpot": latest[0], "aif": latest[1], "updated": str(latest[2])}
@@ -251,16 +361,18 @@ async def get_funds_data():
     
     for r in rows:
         dt = r[2]
-        if dt.tzinfo is None: dt = dt.replace(tzinfo=None)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=None)
         monthly[dt.strftime("%Y-%m")].append((r[0], r[1]))
-        
+    
     averages = []
     for mk in sorted(monthly.keys()):
         d = monthly[mk]
         averages.append({
-            "month_key": mk, 
-            "month_name": month_names.get(mk.split("-")[1], "Месяц"), 
-            "jackpot_avg": round(sum(x[0] for x in d)/len(d), 1), 
+            "month_key": mk,
+            "month_name": month_names.get(mk.split("-")[1], "Месяц"),
+            "jackpot_avg": round(sum(x[0] for x in d)/len(d), 1),
             "aif_avg": round(sum(x[1] for x in d)/len(d), 1)
         })
+    
     return {"latest": latest_data, "monthly_averages": averages}
