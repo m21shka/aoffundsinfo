@@ -1,12 +1,13 @@
 import os
 import sqlite3
 from datetime import datetime
-from fastapi import FastAPI, Request, Form, HTTPException
+from collections import defaultdict
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="AoF Funds Panel")
 DB_PATH = "funds.db"
-# Пароль для панели. Пока оставь так, настроим позже в хостинге
+# Пароль берется из переменной окружения, если нет - используется 1234
 ADMIN_PASSWORD = os.getenv("ADMIN_PASS", "1234")
 
 def get_db():
@@ -16,13 +17,13 @@ def get_db():
 
 def init_db():
     conn = get_db()
+    # Таблица теперь хранит ИСТОРИЮ записей (удален CHECK id=1, добавлен AUTOINCREMENT)
     conn.execute("""CREATE TABLE IF NOT EXISTS funds (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         jackpot INTEGER DEFAULT 0,
         aif INTEGER DEFAULT 0,
-        updated_at TEXT DEFAULT (datetime('now'))
+        created_at TEXT DEFAULT (datetime('now'))
     )""")
-    conn.execute("INSERT OR IGNORE INTO funds (id, jackpot, aif) VALUES (1, 0, 0)")
     conn.commit()
     conn.close()
 
@@ -33,12 +34,18 @@ def startup():
 @app.get("/", response_class=HTMLResponse)
 async def admin_page():
     conn = get_db()
-    row = conn.execute("SELECT * FROM funds WHERE id = 1").fetchone()
+    row = conn.execute("SELECT jackpot, aif, created_at FROM funds ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
     
-    updated = datetime.fromisoformat(row["updated_at"]).strftime("%d.%m %H:%M")
+    if row:
+        updated = datetime.strptime(row["created_at"], "%Y-%m-%d %H:%M:%S").strftime("%d.%m %H:%M")
+        jp_val = row["jackpot"]
+        aif_val = row["aif"]
+    else:
+        updated = "Нет данных"
+        jp_val = 0
+        aif_val = 0
     
-    # CSS-скобки удвоены, чтобы не конфликтовать с f-строкой
     html = f"""
     <!DOCTYPE html>
     <html lang="ru">
@@ -68,11 +75,11 @@ async def admin_page():
             <form method="post" action="/update">
                 <div class="input-group">
                     <label>Jackpot (BB)</label>
-                    <input type="number" name="jackpot" value="{row['jackpot']}" required>
+                    <input type="number" name="jackpot" value="{jp_val}" required>
                 </div>
                 <div class="input-group">
                     <label>All-in-Fortune (BB)</label>
-                    <input type="number" name="aif" value="{row['aif']}" required>
+                    <input type="number" name="aif" value="{aif_val}" required>
                 </div>
                 <div class="input-group">
                     <label>🔑 Пароль</label>
@@ -95,18 +102,55 @@ async def update_funds(jackpot: int = Form(...), aif: int = Form(...), password:
         raise HTTPException(status_code=400, detail="Значения не могут быть отрицательными")
         
     conn = get_db()
-    conn.execute("UPDATE funds SET jackpot = ?, aif = ?, updated_at = datetime('now') WHERE id = 1", (jackpot, aif))
+    # Теперь данные ДОБАВЛЯЮТСЯ, а не перезаписываются. Это нужно для истории и средних значений.
+    conn.execute("INSERT INTO funds (jackpot, aif) VALUES (?, ?)", (jackpot, aif))
     conn.commit()
     conn.close()
     return {"status": "ok", "message": "Данные сохранены"}
 
-@app.get("/api/funds")
-async def get_funds():
+@app.get("/api/data")
+async def get_funds_data():
     conn = get_db()
-    row = conn.execute("SELECT * FROM funds WHERE id = 1").fetchone()
+    rows = conn.execute("SELECT jackpot, aif, created_at FROM funds ORDER BY created_at ASC").fetchall()
     conn.close()
-    return {
-        "jackpot": row["jackpot"],
-        "aif": row["aif"],
-        "updated": row["updated_at"]
+
+    if not rows:
+        return {"latest": {"jackpot": 0, "aif": 0}, "monthly_averages": []}
+
+    latest = rows[-1]
+    latest_data = {
+        "jackpot": latest["jackpot"],
+        "aif": latest["aif"],
+        "updated": latest["created_at"]
     }
+
+    # Группировка по месяцам для расчета средних
+    monthly = defaultdict(list)
+    month_names = {
+        "01": "Январь", "02": "Февраль", "03": "Март", "04": "Апрель", "05": "Май",
+        "06": "Июнь", "07": "Июль", "08": "Август", "09": "Сентябрь", "10": "Октябрь",
+        "11": "Ноябрь", "12": "Декабрь"
+    }
+
+    for r in rows:
+        try:
+            dt = datetime.strptime(r["created_at"], "%Y-%m-%d %H:%M:%S")
+            key = dt.strftime("%Y-%m")
+            monthly[key].append((r["jackpot"], r["aif"]))
+        except Exception:
+            continue
+
+    averages = []
+    for month_key in sorted(monthly.keys()):
+        data = monthly[month_key]
+        jp_avg = sum(d[0] for d in data) / len(data)
+        aif_avg = sum(d[1] for d in data) / len(data)
+        month_num = month_key.split("-")[1]
+        averages.append({
+            "month_key": month_key,
+            "month_name": month_names.get(month_num, "Месяц"),
+            "jackpot_avg": round(jp_avg, 1),
+            "aif_avg": round(aif_avg, 1)
+        })
+
+    return {"latest": latest_data, "monthly_averages": averages}
